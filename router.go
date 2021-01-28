@@ -203,6 +203,9 @@ type Router struct {
 	// The handler can be used to keep your server from crashing because of
 	// unrecovered panics.
 	PanicHandler func(http.ResponseWriter, *http.Request, interface{})
+
+	// Function to wrap any handler including errors and not found.
+	Middleware func(next Handle) Handle
 }
 
 // Make sure the Router conforms with the http.Handler interface
@@ -468,6 +471,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	if root := r.trees[req.Method]; root != nil {
 		if handle, ps, tsr := root.getValue(path, r.getParams); handle != nil {
+			if r.Middleware != nil {
+				handle = r.Middleware(handle)
+			}
 			if ps != nil {
 				handle(w, req, *ps)
 				r.putParams(ps)
@@ -489,7 +495,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				} else {
 					req.URL.Path = path + "/"
 				}
-				http.Redirect(w, req, req.URL.String(), code)
+				r.middlewareRedirectFunc(http.Redirect, w, req, req.URL.String(), code)
 				return
 			}
 
@@ -501,7 +507,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				)
 				if found {
 					req.URL.Path = fixedPath
-					http.Redirect(w, req, req.URL.String(), code)
+					r.middlewareRedirectFunc(http.Redirect, w, req, req.URL.String(), code)
 					return
 				}
 			}
@@ -513,7 +519,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if allow := r.allowed(path, http.MethodOptions); allow != "" {
 			w.Header().Set("Allow", allow)
 			if r.GlobalOPTIONS != nil {
-				r.GlobalOPTIONS.ServeHTTP(w, req)
+				r.handleMiddleware(r.GlobalOPTIONS).ServeHTTP(w, req)
+			} else {
+				r.handleMiddleware(emptyHandler{}).ServeHTTP(w, req)
 			}
 			return
 		}
@@ -521,12 +529,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if allow := r.allowed(path, req.Method); allow != "" {
 			w.Header().Set("Allow", allow)
 			if r.MethodNotAllowed != nil {
-				r.MethodNotAllowed.ServeHTTP(w, req)
+				r.handleMiddleware(r.MethodNotAllowed).ServeHTTP(w, req)
 			} else {
-				http.Error(w,
-					http.StatusText(http.StatusMethodNotAllowed),
-					http.StatusMethodNotAllowed,
-				)
+				r.middlewareErrorFunc(http.Error, w, req, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 			}
 			return
 		}
@@ -534,8 +539,61 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// Handle 404
 	if r.NotFound != nil {
-		r.NotFound.ServeHTTP(w, req)
+		r.handleMiddleware(r.NotFound).ServeHTTP(w, req)
 	} else {
-		http.NotFound(w, req)
+		r.middlewareFunc(http.NotFound, w, req)
 	}
 }
+
+// handleMiddleware return a handler wrapped by router middleware if exists
+func (r *Router) handleMiddleware(handler http.Handler) http.Handler {
+	if r.Middleware == nil {
+		return handler
+	}
+
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		r.Middleware(func(writer http.ResponseWriter, request *http.Request, params Params) {
+			handler.ServeHTTP(writer, request)
+		})(writer, request, nil)
+	})
+}
+
+// middlewareFunc perform handle function wrapped in router middleware if exists
+func (r *Router) middlewareFunc(h func(w http.ResponseWriter, r *http.Request), writer http.ResponseWriter, request *http.Request) {
+	if r.Middleware == nil {
+		h(writer, request)
+		return
+	}
+
+	r.Middleware(func(writer http.ResponseWriter, request *http.Request, params Params) {
+		h(writer, request)
+	})(writer, request, nil)
+}
+
+// middlewareErrorFunc perform error function wrapped in router middleware if exists
+func (r *Router) middlewareErrorFunc(h func(w http.ResponseWriter, error string, code int), writer http.ResponseWriter, request *http.Request, error string, code int) {
+	if r.Middleware == nil {
+		h(writer, error, code)
+		return
+	}
+
+	r.Middleware(func(writer http.ResponseWriter, request *http.Request, params Params) {
+		h(writer, error, code)
+	})(writer, request, nil)
+}
+
+// middlewareRedirectFunc perform redirect function wrapped in router middleware if exists
+func (r *Router) middlewareRedirectFunc(h func(w http.ResponseWriter, r *http.Request, url string, code int), writer http.ResponseWriter, request *http.Request, url string, code int) {
+	if r.Middleware == nil {
+		h(writer, request, url, code)
+		return
+	}
+
+	r.Middleware(func(writer http.ResponseWriter, request *http.Request, params Params) {
+		h(writer, request, url, code)
+	})(writer, request, nil)
+}
+
+type emptyHandler struct{}
+
+func (e emptyHandler) ServeHTTP(_ http.ResponseWriter, _ *http.Request) {}

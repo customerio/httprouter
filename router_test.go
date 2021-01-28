@@ -697,3 +697,66 @@ func TestRouterServeFiles(t *testing.T) {
 		t.Error("serving file failed")
 	}
 }
+
+func TestRouterMiddleware(t *testing.T) {
+	var (
+		// requests
+		requestGET, _      = http.NewRequest(http.MethodGet, "/users", nil)
+		requestGETSlash, _ = http.NewRequest(http.MethodGet, "/users/", nil)
+		requestOPTIONS, _  = http.NewRequest(http.MethodOptions, "/users", nil)
+		requestUnknown, _  = http.NewRequest(http.MethodPost, "/unknown", nil)
+
+		// middlewares
+		middlewarePre = func(next Handle) Handle {
+			return func(writer http.ResponseWriter, request *http.Request, params Params) {
+				writer.Header().Set("Foo", "pre middleware")
+				next(writer, request, params)
+			}
+		}
+		middlewarePost = func(next Handle) Handle {
+			return func(writer http.ResponseWriter, request *http.Request, params Params) {
+				next(writer, request, params)
+				writer.Header().Set("Foo", "post middleware")
+			}
+		}
+
+		// handlers
+		emptyGET = func(router *Router) {
+			router.Handle(http.MethodGet, "/users", func(writer http.ResponseWriter, request *http.Request, params Params) {})
+		}
+		headerGET = func(router *Router) {
+			router.Handle(http.MethodGet, "/users", func(writer http.ResponseWriter, request *http.Request, params Params) {
+				writer.Header().Set("Foo", "handler")
+			})
+		}
+	)
+
+	tt := []struct {
+		name       string
+		middleware func(next Handle) Handle
+		handler    func(router *Router)
+		request    *http.Request
+		wantHeader http.Header
+	}{
+		{name: "middleware header", middleware: middlewarePre, handler: emptyGET, request: requestGET, wantHeader: map[string][]string{"Foo": {"pre middleware"}}},
+		{name: "handler overwrite", middleware: middlewarePre, handler: headerGET, request: requestGET, wantHeader: map[string][]string{"Foo": {"handler"}}},
+		{name: "middleware overwrite", middleware: middlewarePost, handler: headerGET, request: requestGET, wantHeader: map[string][]string{"Foo": {"post middleware"}}},
+		{name: "not found", middleware: middlewarePre, handler: emptyGET, request: requestUnknown, wantHeader: map[string][]string{"Foo": {"pre middleware"}, "Content-Type": {"text/plain; charset=utf-8"}, "X-Content-Type-Options": {"nosniff"}}},
+		{name: "redirection", middleware: middlewarePre, handler: emptyGET, request: requestGETSlash, wantHeader: map[string][]string{"Foo": {"pre middleware"}, "Content-Type": {"text/html; charset=utf-8"}, "Location": {"/users"}}},
+		{name: "options", middleware: middlewarePre, handler: emptyGET, request: requestOPTIONS, wantHeader: map[string][]string{"Foo": {"pre middleware"}, "Allow": {"GET, OPTIONS"}}},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			router := New()
+			router.Middleware = tc.middleware
+			tc.handler(router)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, tc.request)
+
+			if !reflect.DeepEqual(w.Header(), tc.wantHeader) {
+				t.Errorf("headers got %v, want %v", w.Header(), tc.wantHeader)
+			}
+		})
+	}
+}
