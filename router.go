@@ -47,37 +47,44 @@
 // Named parameters are dynamic path segments. They match anything until the
 // next '/' or the path end:
 //
-//	Path: /blog/:category/:post
+//	 Path: /blog/:category/:post
 //
-//	Requests:
-//	 /blog/go/request-routers            match: category="go", post="request-routers"
-//	 /blog/go/request-routers/           no match, but the router would redirect
-//	 /blog/go/                           no match
-//	 /blog/go/request-routers/comments   no match
+//		Path: /blog/:category/:post
+//
+//		Requests:
+//		 /blog/go/request-routers            match: category="go", post="request-routers"
+//		 /blog/go/request-routers/           no match, but the router would redirect
+//		 /blog/go/                           no match
+//		 /blog/go/request-routers/comments   no match
 //
 // Catch-all parameters match anything until the path end, including the
 // directory index (the '/' before the catch-all). Since they match anything
 // until the end, catch-all parameters must always be the final path element.
 //
-//	Path: /files/*filepath
+//	 Path: /files/*filepath
 //
-//	Requests:
-//	 /files/                             match: filepath="/"
-//	 /files/LICENSE                      match: filepath="/LICENSE"
-//	 /files/templates/article.html       match: filepath="/templates/article.html"
-//	 /files                              no match, but the router would redirect
+//		Path: /files/*filepath
+//
+//		Requests:
+//		 /files/                             match: filepath="/"
+//		 /files/LICENSE                      match: filepath="/LICENSE"
+//		 /files/templates/article.html       match: filepath="/templates/article.html"
+//		 /files                              no match, but the router would redirect
 //
 // The value of parameters is saved as a slice of the Param struct, consisting
 // each of a key and a value. The slice is passed to the Handle func as a third
 // parameter.
 // There are two ways to retrieve the value of a parameter:
 //
-//	// by the name of the parameter
-//	user := ps.ByName("user") // defined by :user or *user
+//	 // by the name of the parameter
+//	 user := ps.ByName("user") // defined by :user or *user
 //
-//	// by the index of the parameter. This way you can also get the name (key)
-//	thirdKey   := ps[2].Key   // the name of the 3rd parameter
-//	thirdValue := ps[2].Value // the value of the 3rd parameter
+//		// by the name of the parameter
+//		user := ps.ByName("user") // defined by :user or *user
+//
+//		// by the index of the parameter. This way you can also get the name (key)
+//		thirdKey   := ps[2].Key   // the name of the 3rd parameter
+//		thirdValue := ps[2].Value // the value of the 3rd parameter
 package httprouter
 
 import (
@@ -136,6 +143,9 @@ var MatchedRoutePathParam = "$matchedRoutePath"
 func (ps Params) MatchedRoutePath() string {
 	return ps.ByName(MatchedRoutePathParam)
 }
+
+// Middleware is a function that wraps a Handle.
+type Middleware func(Handle) Handle
 
 // Router is a http.Handler which can be used to dispatch requests to different
 // handler functions via configurable routes
@@ -207,6 +217,9 @@ type Router struct {
 	// The handler can be used to keep your server from crashing because of
 	// unrecovered panics.
 	PanicHandler func(http.ResponseWriter, *http.Request, interface{})
+
+	// Middleware chain
+	middlewares []Middleware
 }
 
 // Make sure the Router conforms with the http.Handler interface
@@ -285,6 +298,19 @@ func (r *Router) DELETE(path string, handle Handle) {
 	r.Handle(http.MethodDelete, path, handle)
 }
 
+// Use appends a middleware to the router's middleware chain.
+func (r *Router) Use(mw Middleware) {
+	r.middlewares = append(r.middlewares, mw)
+}
+
+// wrapMiddlewares applies the middleware chain to a handler.
+func (r *Router) wrapMiddlewares(h Handle) Handle {
+	for i := len(r.middlewares) - 1; i >= 0; i-- {
+		h = r.middlewares[i](h)
+	}
+	return h
+}
+
 // Handle registers a new request handle with the given path and method.
 //
 // For GET, POST, PUT, PATCH and DELETE requests the respective shortcut
@@ -310,6 +336,9 @@ func (r *Router) Handle(method, path string, handle Handle) {
 		varsCount++
 		handle = r.saveMatchedRoutePath(path, handle)
 	}
+
+	// Wrap with middleware
+	handle = r.wrapMiddlewares(handle)
 
 	if r.trees == nil {
 		r.trees = make(map[string]*node)
