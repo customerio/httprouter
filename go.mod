@@ -1,3 +1,3 @@
-module github.com/julienschmidt/httprouter
+module github.com/customerio/httprouter
 
-go 1.7
+go 1.16
