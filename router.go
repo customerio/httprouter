@@ -90,6 +90,7 @@ package httprouter
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -305,8 +306,8 @@ func (r *Router) Use(mw Middleware) {
 
 // wrapMiddlewares applies the middleware chain to a handler.
 func (r *Router) wrapMiddlewares(h Handle) Handle {
-	for i := len(r.middlewares) - 1; i >= 0; i-- {
-		h = r.middlewares[i](h)
+	for _, mw := range slices.Backward(r.middlewares) {
+		h = mw(h)
 	}
 	return h
 }
