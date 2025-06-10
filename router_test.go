@@ -697,3 +697,175 @@ func TestRouterServeFiles(t *testing.T) {
 		t.Error("serving file failed")
 	}
 }
+
+func TestRouterURLEncoding_Issue106_CurrentBehavior(t *testing.T) {
+	// This test documents the CURRENT behavior of the router regarding URL encoding
+	// Issue #106 was about preserving URL encoding, but the current implementation
+	// still unescapes parameter values even when using RequestURI
+
+	router := New()
+
+	var capturedParam string
+	router.GET("/user/:name", func(w http.ResponseWriter, r *http.Request, ps Params) {
+		capturedParam = ps.ByName("name")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name                 string
+		path                 string
+		expectedDecodedParam string // What we currently get (decoded)
+		expectedRawParam     string // What Issue #106 intended (raw/encoded)
+	}{
+		{
+			name:                 "encoded forward slash",
+			path:                 "/user/john%2Fdoe",
+			expectedDecodedParam: "john/doe",   // Current behavior: decoded by pathUnescape()
+			expectedRawParam:     "john%2Fdoe", // Issue #106 intent: preserve encoding
+		},
+		{
+			name:                 "encoded space",
+			path:                 "/user/john%20doe",
+			expectedDecodedParam: "john doe",   // Current: decoded
+			expectedRawParam:     "john%20doe", // Issue #106: preserve encoding
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capturedParam = ""
+
+			// Test with RequestURI populated (production-like)
+			req, _ := http.NewRequest(http.MethodGet, tt.path, nil)
+			req.RequestURI = tt.path
+
+			t.Logf("Request URL.Path: %q (decoded by Go)", req.URL.Path)
+			t.Logf("Request RequestURI: %q (raw, as sent by client)", req.RequestURI)
+
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("Expected status 200, got %d", w.Code)
+			}
+
+			// Document current behavior
+			if capturedParam == tt.expectedDecodedParam {
+				t.Logf("✓ Current behavior confirmed: parameter = %q (decoded)", capturedParam)
+			} else {
+				t.Errorf("Unexpected current behavior: got %q, expected decoded value %q", capturedParam, tt.expectedDecodedParam)
+			}
+
+			// Show what Issue #106 intended
+			t.Logf("⚠️  Issue #106 intent: parameter should be %q (preserve encoding)", tt.expectedRawParam)
+			t.Logf("📝 Gap: tree.getValue() calls pathUnescape() on extracted parameters")
+		})
+	}
+}
+
+func TestRouterURLEncoding_FallbackCompatibility(t *testing.T) {
+	// This test validates our fallback mechanism works for test environments
+	// where RequestURI is empty (like http.NewRequest creates)
+	router := New()
+
+	var captured string
+	router.GET("/simple/:param", func(w http.ResponseWriter, r *http.Request, ps Params) {
+		captured = ps.ByName("param")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("fallback to URL.Path when RequestURI empty", func(t *testing.T) {
+		captured = ""
+
+		// This simulates test environment - RequestURI is empty
+		req, _ := http.NewRequest(http.MethodGet, "/simple/testvalue", nil)
+		// req.RequestURI is empty by default from http.NewRequest
+
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		if captured != "testvalue" {
+			t.Errorf("Expected parameter 'testvalue', got %q", captured)
+		}
+	})
+
+	t.Run("prefers RequestURI when available", func(t *testing.T) {
+		captured = ""
+
+		// This simulates production environment - RequestURI is populated
+		req, _ := http.NewRequest(http.MethodGet, "/simple/testvalue", nil)
+		req.RequestURI = "/simple/encoded%20value" // Different from URL.Path
+
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+
+		// Current behavior: even when using RequestURI, parameters are decoded by pathUnescape()
+		if captured != "encoded value" {
+			t.Errorf("Expected parameter 'encoded value' (decoded), got %q", captured)
+		}
+
+		t.Logf("✓ RequestURI path used for routing: %q", req.RequestURI)
+		t.Logf("✓ But parameter still decoded: %q", captured)
+		t.Logf("📝 This confirms our fallback mechanism works for routing")
+	})
+}
+
+func TestRouterURLEncoding_Issue106_BreakageDemo(t *testing.T) {
+	// This test demonstrates the limitation when only URL.Path is available
+	// (i.e., what happens in test environments without RequestURI)
+
+	t.Run("demonstrate_critical_routing_breakage", func(t *testing.T) {
+		router := New()
+
+		var captured string
+		router.GET("/user/:name", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			captured = ps.ByName("name")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		// This demonstrates the CRITICAL Issue #106 problem
+		req, _ := http.NewRequest(http.MethodGet, "/user/john%2Fdoe", nil)
+
+		t.Logf("🚨 CRITICAL Issue #106 Problem Demonstration:")
+		t.Logf("   Original URL: /user/john%%2Fdoe")
+		t.Logf("   Route pattern: /user/:name")
+		t.Logf("   req.URL.Path: %q (decoded by Go)", req.URL.Path)
+		t.Logf("   req.RequestURI: %q (empty in tests)", req.RequestURI)
+
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		// This SHOULD be 404 because URL.Path breaks the routing!
+		if w.Code == http.StatusNotFound {
+			t.Logf("✓ Expected 404 - routing broke due to URL decoding")
+			t.Logf("💥 Problem: /user/john%%2Fdoe → /user/john/doe (2 segments, doesn't match :name)")
+		} else {
+			t.Errorf("Expected 404 (routing failure), got %d", w.Code)
+		}
+
+		t.Logf("📝 This is EXACTLY why Issue #106 needed RequestURI:")
+		t.Logf("   - URL.Path decodes %%2F to /, breaking route matching")
+		t.Logf("   - RequestURI preserves %%2F, allowing route to match")
+		t.Logf("   - Without RequestURI, encoded slashes in parameters break routing")
+
+		// Now test what happens WITH RequestURI (production scenario)
+		req.RequestURI = "/user/john%2Fdoe" // Simulate production
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code == http.StatusOK {
+			t.Logf("✅ With RequestURI: routing works! Status=%d", w.Code)
+			t.Logf("✅ Parameter captured: %q (decoded but route matched)", captured)
+		} else {
+			t.Errorf("With RequestURI, expected 200, got %d", w.Code)
+		}
+	})
+}
