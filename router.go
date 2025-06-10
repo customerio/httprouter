@@ -469,7 +469,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	path := req.URL.Path
-	//path := strings.Split(req.RequestURI, "?")[0]
+	if req.RequestURI != "" {
+		// Use RequestURI when available to preserve URL encoding
+		path = strings.Split(req.RequestURI, "?")[0]
+	}
 
 	if root := r.trees[req.Method]; root != nil {
 		if handle, ps, tsr := root.getValue(path, r.getParams); handle != nil {
