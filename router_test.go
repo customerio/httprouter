@@ -869,3 +869,427 @@ func TestRouterURLEncoding_Issue106_BreakageDemo(t *testing.T) {
 		}
 	})
 }
+
+func TestRouterMiddleware(t *testing.T) {
+	// Test basic middleware functionality
+	t.Run("basic middleware", func(t *testing.T) {
+		router := New()
+		middlewareCalled := false
+		handlerCalled := false
+
+		// Add middleware that sets a flag
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				middlewareCalled = true
+				next(w, r, ps)
+			}
+		})
+
+		// Add a route
+		router.GET("/test", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+
+		// Make request
+		req, _ := http.NewRequest(http.MethodGet, "/test", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if !middlewareCalled {
+			t.Error("Middleware was not called")
+		}
+		if !handlerCalled {
+			t.Error("Handler was not called")
+		}
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+	})
+
+	// Test multiple middleware chaining
+	t.Run("multiple middleware chaining", func(t *testing.T) {
+		router := New()
+		var callOrder []string
+
+		// Add first middleware
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				callOrder = append(callOrder, "middleware1-before")
+				next(w, r, ps)
+				callOrder = append(callOrder, "middleware1-after")
+			}
+		})
+
+		// Add second middleware
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				callOrder = append(callOrder, "middleware2-before")
+				next(w, r, ps)
+				callOrder = append(callOrder, "middleware2-after")
+			}
+		})
+
+		// Add handler
+		router.GET("/chain", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			callOrder = append(callOrder, "handler")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		// Make request
+		req, _ := http.NewRequest(http.MethodGet, "/chain", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		// Verify execution order (first added middleware runs outermost)
+		expectedOrder := []string{
+			"middleware1-before", // First added middleware runs outermost
+			"middleware2-before",
+			"handler",
+			"middleware2-after",
+			"middleware1-after", // First added middleware finishes outermost
+		}
+
+		if len(callOrder) != len(expectedOrder) {
+			t.Errorf("Expected %d calls, got %d", len(expectedOrder), len(callOrder))
+		}
+
+		for i, expected := range expectedOrder {
+			if i >= len(callOrder) || callOrder[i] != expected {
+				t.Errorf("Call order mismatch at position %d: expected %q, got %q", i, expected, callOrder[i])
+			}
+		}
+	})
+
+	// Test middleware with request modification
+	t.Run("middleware modifying request", func(t *testing.T) {
+		router := New()
+
+		// Middleware that adds a header
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				r.Header.Set("X-Middleware", "applied")
+				next(w, r, ps)
+			}
+		})
+
+		var receivedHeader string
+		router.GET("/modify", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			receivedHeader = r.Header.Get("X-Middleware")
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req, _ := http.NewRequest(http.MethodGet, "/modify", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if receivedHeader != "applied" {
+			t.Errorf("Expected header 'applied', got %q", receivedHeader)
+		}
+	})
+
+	// Test middleware with response modification
+	t.Run("middleware modifying response", func(t *testing.T) {
+		router := New()
+
+		// Middleware that adds response header
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				w.Header().Set("X-Custom-Header", "middleware-value")
+				next(w, r, ps)
+			}
+		})
+
+		router.GET("/response", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("response body"))
+		})
+
+		req, _ := http.NewRequest(http.MethodGet, "/response", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Header().Get("X-Custom-Header") != "middleware-value" {
+			t.Error("Middleware did not set response header")
+		}
+		if w.Body.String() != "response body" {
+			t.Errorf("Expected body 'response body', got %q", w.Body.String())
+		}
+	})
+
+	// Test middleware with parameters
+	t.Run("middleware with parameters", func(t *testing.T) {
+		router := New()
+		var capturedParams Params
+
+		// Middleware that captures params
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				capturedParams = ps
+				next(w, r, ps)
+			}
+		})
+
+		router.GET("/user/:id/posts/:postId", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req, _ := http.NewRequest(http.MethodGet, "/user/123/posts/456", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if len(capturedParams) != 2 {
+			t.Errorf("Expected 2 params, got %d", len(capturedParams))
+		}
+		if capturedParams.ByName("id") != "123" {
+			t.Errorf("Expected id=123, got %q", capturedParams.ByName("id"))
+		}
+		if capturedParams.ByName("postId") != "456" {
+			t.Errorf("Expected postId=456, got %q", capturedParams.ByName("postId"))
+		}
+	})
+
+	// Test middleware affecting different HTTP methods
+	t.Run("middleware with different HTTP methods", func(t *testing.T) {
+		router := New()
+		var methodsSeen []string
+
+		// Middleware that tracks HTTP methods
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				methodsSeen = append(methodsSeen, r.Method)
+				next(w, r, ps)
+			}
+		})
+
+		// Register handlers for different methods
+		router.GET("/api", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			w.WriteHeader(http.StatusOK)
+		})
+		router.POST("/api", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			w.WriteHeader(http.StatusCreated)
+		})
+		router.PUT("/api", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		// Test GET
+		req, _ := http.NewRequest(http.MethodGet, "/api", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("GET: Expected status 200, got %d", w.Code)
+		}
+
+		// Test POST
+		req, _ = http.NewRequest(http.MethodPost, "/api", nil)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusCreated {
+			t.Errorf("POST: Expected status 201, got %d", w.Code)
+		}
+
+		// Test PUT
+		req, _ = http.NewRequest(http.MethodPut, "/api", nil)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("PUT: Expected status 200, got %d", w.Code)
+		}
+
+		expectedMethods := []string{"GET", "POST", "PUT"}
+		if len(methodsSeen) != len(expectedMethods) {
+			t.Errorf("Expected %d method calls, got %d", len(expectedMethods), len(methodsSeen))
+		}
+		for i, expected := range expectedMethods {
+			if i >= len(methodsSeen) || methodsSeen[i] != expected {
+				t.Errorf("Method %d: expected %s, got %s", i, expected, methodsSeen[i])
+			}
+		}
+	})
+
+	// Test early return from middleware
+	t.Run("middleware early return", func(t *testing.T) {
+		router := New()
+		handlerCalled := false
+
+		// Middleware that returns early under certain conditions
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				if r.Header.Get("X-Block") == "true" {
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte("blocked by middleware"))
+					return // Don't call next()
+				}
+				next(w, r, ps)
+			}
+		})
+
+		router.GET("/protected", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("handler response"))
+		})
+
+		// Test blocked request
+		req, _ := http.NewRequest(http.MethodGet, "/protected", nil)
+		req.Header.Set("X-Block", "true")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("Expected status 403, got %d", w.Code)
+		}
+		if w.Body.String() != "blocked by middleware" {
+			t.Errorf("Expected 'blocked by middleware', got %q", w.Body.String())
+		}
+		if handlerCalled {
+			t.Error("Handler should not have been called when middleware blocks")
+		}
+
+		// Test allowed request
+		handlerCalled = false
+		req, _ = http.NewRequest(http.MethodGet, "/protected", nil)
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", w.Code)
+		}
+		if w.Body.String() != "handler response" {
+			t.Errorf("Expected 'handler response', got %q", w.Body.String())
+		}
+		if !handlerCalled {
+			t.Error("Handler should have been called for allowed request")
+		}
+	})
+
+	// Test middleware with SaveMatchedRoutePath
+	t.Run("middleware with SaveMatchedRoutePath", func(t *testing.T) {
+		router := New()
+		router.SaveMatchedRoutePath = true
+
+		var middlewareParams Params
+		var handlerParams Params
+
+		router.Use(func(next Handle) Handle {
+			return func(w http.ResponseWriter, r *http.Request, ps Params) {
+				middlewareParams = ps
+				next(w, r, ps)
+			}
+		})
+
+		router.GET("/route/:param", func(w http.ResponseWriter, r *http.Request, ps Params) {
+			handlerParams = ps
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req, _ := http.NewRequest(http.MethodGet, "/route/value", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		// Middleware runs before SaveMatchedRoutePath is applied, so it won't see the matched route path
+		// But the handler should see it correctly
+		if middlewareParams.MatchedRoutePath() != "" {
+			t.Errorf("Middleware: expected empty matched route (runs before SaveMatchedRoutePath), got %q", middlewareParams.MatchedRoutePath())
+		}
+		if handlerParams.MatchedRoutePath() != "/route/:param" {
+			t.Errorf("Handler: expected matched route '/route/:param', got %q", handlerParams.MatchedRoutePath())
+		}
+		if handlerParams.ByName("param") != "value" {
+			t.Errorf("Expected param 'value', got %q", handlerParams.ByName("param"))
+		}
+	})
+}
+
+func TestRouterMiddlewareWithPanic(t *testing.T) {
+	// Test middleware behavior with panic recovery
+	router := New()
+	middlewareCalled := false
+	panicHandlerCalled := false
+
+	router.PanicHandler = func(w http.ResponseWriter, r *http.Request, p interface{}) {
+		panicHandlerCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("panic recovered"))
+	}
+
+	// Middleware that should be called before panic
+	router.Use(func(next Handle) Handle {
+		return func(w http.ResponseWriter, r *http.Request, ps Params) {
+			middlewareCalled = true
+			defer func() {
+				// This defer should execute even if next() panics
+			}()
+			next(w, r, ps)
+		}
+	})
+
+	// Handler that panics
+	router.GET("/panic", func(w http.ResponseWriter, r *http.Request, ps Params) {
+		panic("test panic")
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/panic", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if !middlewareCalled {
+		t.Error("Middleware should have been called before panic")
+	}
+	if !panicHandlerCalled {
+		t.Error("Panic handler should have been called")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("Expected status 500, got %d", w.Code)
+	}
+}
+
+func BenchmarkRouterWithMiddleware(b *testing.B) {
+	router := New()
+
+	// Add a few middleware
+	router.Use(func(next Handle) Handle {
+		return func(w http.ResponseWriter, r *http.Request, ps Params) {
+			next(w, r, ps)
+		}
+	})
+
+	router.Use(func(next Handle) Handle {
+		return func(w http.ResponseWriter, r *http.Request, ps Params) {
+			next(w, r, ps)
+		}
+	})
+
+	router.GET("/bench/:param", func(w http.ResponseWriter, r *http.Request, ps Params) {
+		// Minimal handler
+	})
+
+	w := new(mockResponseWriter)
+	r, _ := http.NewRequest(http.MethodGet, "/bench/test", nil)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		router.ServeHTTP(w, r)
+	}
+}
+
+func BenchmarkRouterWithoutMiddleware(b *testing.B) {
+	router := New()
+
+	router.GET("/bench/:param", func(w http.ResponseWriter, r *http.Request, ps Params) {
+		// Minimal handler
+	})
+
+	w := new(mockResponseWriter)
+	r, _ := http.NewRequest(http.MethodGet, "/bench/test", nil)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		router.ServeHTTP(w, r)
+	}
+}
