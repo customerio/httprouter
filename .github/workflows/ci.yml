@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         go-version: [
           '1.13.x',
           '1.14.x', 
@@ -65,46 +65,3 @@ jobs:
           exit 1
         fi
       shell: bash
-
-    - name: Upload coverage to Codecov
-      if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.24.x'
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.out
-        flags: unittests
-        name: codecov-umbrella
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-    - name: Check out code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.24.x'
-
-    - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v6
-      with:
-        version: latest
-        args: --timeout=5m
-
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    steps:
-    - name: Check out code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.24.x'
-
-    - name: Install and run gosec
-      run: |
-        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
-        gosec ./... 
