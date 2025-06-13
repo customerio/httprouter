@@ -333,13 +333,13 @@ func (r *Router) Handle(method, path string, handle Handle) {
 		panic("handle must not be nil")
 	}
 
+	// Wrap with middleware first
+	handle = r.wrapMiddlewares(handle)
+
 	if r.SaveMatchedRoutePath {
 		varsCount++
 		handle = r.saveMatchedRoutePath(path, handle)
 	}
-
-	// Wrap with middleware
-	handle = r.wrapMiddlewares(handle)
 
 	if r.trees == nil {
 		r.trees = make(map[string]*node)
