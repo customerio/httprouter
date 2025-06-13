@@ -1188,10 +1188,9 @@ func TestRouterMiddleware(t *testing.T) {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 
-		// Middleware runs before SaveMatchedRoutePath is applied, so it won't see the matched route path
-		// But the handler should see it correctly
-		if middlewareParams.MatchedRoutePath() != "" {
-			t.Errorf("Middleware: expected empty matched route (runs before SaveMatchedRoutePath), got %q", middlewareParams.MatchedRoutePath())
+		// Middleware now runs after SaveMatchedRoutePath is applied, so it should see the matched route path
+		if middlewareParams.MatchedRoutePath() != "/route/:param" {
+			t.Errorf("Middleware: expected matched route '/route/:param', got %q", middlewareParams.MatchedRoutePath())
 		}
 		if handlerParams.MatchedRoutePath() != "/route/:param" {
 			t.Errorf("Handler: expected matched route '/route/:param', got %q", handlerParams.MatchedRoutePath())
